@@ -203,12 +203,25 @@ def plot_season(season_df: pd.DataFrame, window: Optional[int] = 10):
     ax.plot(season_df["year"], season_df["total_mm"],
             marker="o", lw=1.6, label="Season total")
 
+    # inside plot_season() *after* ax is created
+    q_lo, q_hi = season_df.total_mm.quantile([0.33, 0.66])
+    ax.axhspan(0, q_lo,  color="red",   alpha=0.06, label="Dry tercile")
+    ax.axhspan(q_hi, ax.get_ylim()[1], color="blue", alpha=0.06, label="Wet tercile")
+
     # NEW %-of-normal line (secondary y-axis so scales don’t clash)
     ax2 = ax.twinx()
     ax2.plot(season_df["year"], season_df["anom_pct"],
              lw=1.2, ls="--", color="grey", label="% of normal")
     ax2.set_ylabel("% of normal")
     ax2.axhline(0, color="grey", alpha=0.3)
+
+    # still inside plot_season()
+    ax3 = ax.twinx()
+    ax3.bar(season_df["year"], season_df["spi3"], width=0.6,
+        alpha=0.3, color="purple", label="SPI-3")
+    ax3.set_ylabel("SPI-3")
+    # keep 0 line for reference
+    ax3.axhline(0, color="purple", lw=0.8, alpha=0.4)
 
     # rolling trend (optional)
     if window and len(season_df) >= window:
