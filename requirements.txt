@@ -1,0 +1,11 @@
+numpy
+pandas
+xarray
+rasterio
+shapely
+requests
+statsmodels
+scikit-learn
+joblib
+matplotlib
+prophet   
