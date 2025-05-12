@@ -25,6 +25,8 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 import joblib, matplotlib.pyplot as plt
+from scipy import stats                      
+
 
 ################################################################################
 # CONFIG                                                                        
@@ -97,12 +99,33 @@ def preprocess():
     if df.empty:
         raise ValueError("chirps_mam.csv is empty — all downloads failed?")
 
+    n_neg = (df["rain_mm"] < 0).sum()
+    if n_neg:
+        print(f"⚠️  Found {n_neg} negative grid-mean values — converting to abs(mm).")
+        df["rain_mm"] = df["rain_mm"].abs()
+        df.to_csv(df_path, index=False)     
+
+    # --- seasonal aggregation -------------------------------------------------
     season = df.groupby("year")["rain_mm"].agg(total_mm="sum").reset_index()
-    season["anom_z"] = (
-        (season.total_mm - season.total_mm.mean()) / season.total_mm.std(ddof=0)
-    )
+
+    clim_mean = season.loc[(season.year >= 1991) & (season.year <= 2020),
+                           "total_mm"].mean()
+    if np.isnan(clim_mean):                  
+        clim_mean = season["total_mm"].mean()
+    season["anom_pct"] = 100 * (season.total_mm - clim_mean) / clim_mean
+
+    season["anom_z"] = (season.total_mm - season.total_mm.mean()) / season.total_mm.std(ddof=0)
+
+    def spi_gamma(series_mm: pd.Series) -> pd.Series:
+        shp, loc, scl = stats.gamma.fit(series_mm, floc=0)     
+        cdf = stats.gamma.cdf(series_mm, shp, loc=loc, scale=scl)
+        return pd.Series(stats.norm.ppf(cdf), index=series_mm.index)
+
+    season["spi3"] = spi_gamma(season.total_mm)
+
     season.to_csv(PROC_DIR / "season_totals.csv", index=False)
     return season
+
 
 ################################################################################
 # 3. TREND & FORECAST                                                            
@@ -180,6 +203,13 @@ def plot_season(season_df: pd.DataFrame, window: Optional[int] = 10):
     ax.plot(season_df["year"], season_df["total_mm"],
             marker="o", lw=1.6, label="Season total")
 
+    # NEW %-of-normal line (secondary y-axis so scales don’t clash)
+    ax2 = ax.twinx()
+    ax2.plot(season_df["year"], season_df["anom_pct"],
+             lw=1.2, ls="--", color="grey", label="% of normal")
+    ax2.set_ylabel("% of normal")
+    ax2.axhline(0, color="grey", alpha=0.3)
+
     # rolling trend (optional)
     if window and len(season_df) >= window:
         ax.plot(season_df["year"],
@@ -193,6 +223,10 @@ def plot_season(season_df: pd.DataFrame, window: Optional[int] = 10):
     fig.tight_layout()
     fig.savefig(OUT_DIR / "season_totals.png", dpi=150)
     plt.close(fig)
+
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, loc="best")
 
 ################################################################################
 # CLI ENTRY-POINT                                                               
