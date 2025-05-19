@@ -4,7 +4,7 @@ East Africa (Kenya) Long-Rains ML Pipeline  — 15 May 2025
 """
 
 # --- std & 3rd-party ----------------------------------------------------------
-import argparse, gzip, time
+import argparse, time
 from pathlib import Path
 from typing import Tuple, Optional
 
@@ -64,7 +64,10 @@ def fetch_climate_drivers(
           .resample('AS-MAR')       # 1 Mar of each year
           .mean()
     )
-    drivers.index = drivers.index.year   # int years for merge
+    drivers.index = drivers.index.year         # <-- ints, not Timestamps
+    drivers.index.name = "year"                # give the index a name
+    drivers = drivers.reset_index()    
+
     return drivers
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -98,8 +101,11 @@ def download_chirps_month(year: int, month: int,
                     window = from_bounds(
                         bbox[2], bbox[0], bbox[3], bbox[1], transform=src.transform
                     )
-                    data = src.read(1, window=window, masked=True)
-                    return float(data.mean())
+                    data = src.read(1, window=window)
+                     # CHIRPS nodata is -9999 (or occasionally -8888)
+                    data = np.where(data <= -9990, np.nan, data)
+                    
+                    return float(np.nanmean(data))
         except Exception as e:
             if attempt == retries:
                 raise
@@ -168,9 +174,8 @@ def preprocess() -> pd.DataFrame:
     # ------------------------------------------------------------------ #
     n_neg = (df.rain_mm < 0).sum(skipna=True)
     if n_neg:
-        print(f"⚠️  {n_neg} negative values clipped to 0 mm")
-        df["rain_mm"] = df.rain_mm.clip(lower=0)
-
+        print(f"⚠️  {n_neg} negative values → set to NaN")
+        df.loc[df.rain_mm < 0, "rain_mm"] = np.nan
     # keep the cleaned monthly file for future runs
     df.to_csv(DL_FILE, index=False)
 
@@ -218,7 +223,9 @@ def preprocess() -> pd.DataFrame:
     )
 
     season.to_csv(PROC_DIR / "season_totals.csv", index=False)
+    print(season.head())            # preview first, then return
     return season
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3a.  TREND SIGNIFICANCE (MK + Sen)                                         │
@@ -265,13 +272,35 @@ def forecast(season_df: pd.DataFrame, steps: int = 3):
 # 5. CLUSTERING                                                                
 # ──────────────────────────────────────────────────────────────────────────────
 
-def cluster(season_df: pd.DataFrame, k: int = 4):
-    df = pd.read_csv(DATA_DIR / "chirps_mam.csv")
-    pivot = df.pivot(index="year", columns="month", values="rain_mm").reindex(columns=[3, 4, 5])
-    scaler = StandardScaler(); X = scaler.fit_transform(pivot.values)
+def cluster(season_df: pd.DataFrame, k: int = 4, *, impute: bool = False):
+    """
+    K-means on the MAM monthly matrix.
+    Set impute=True to mean-fill NaNs instead of dropping seasons.
+    """
+    df = pd.read_csv(DL_FILE)
+    pivot = (
+        df.pivot(index="year", columns="month", values="rain_mm")
+          .reindex(columns=[3, 4, 5])
+    )
+
+    if impute:
+        pivot_filled = pivot.fillna(pivot.mean())
+        n_dropped = 0
+    else:
+        n_dropped = pivot.isna().any(axis=1).sum()
+        pivot_filled = pivot.dropna()
+
+    if n_dropped:
+        print(f"ℹ️  Dropped {n_dropped} season(s) with missing months "
+              f"before clustering")
+
+    scaler = StandardScaler()
+    X      = scaler.fit_transform(pivot_filled.values)
+
     km = KMeans(n_clusters=k, n_init="auto", random_state=0).fit(X)
-    pivot["cluster"] = km.labels_
-    pivot.to_csv(OUT_DIR / "clustered_years.csv")
+    pivot_filled["cluster"] = km.labels_
+    pivot_filled.to_csv(OUT_DIR / "clustered_years.csv")
+
     joblib.dump(km, OUT_DIR / "kmeans.pkl")
     print("Cluster counts:", np.bincount(km.labels_))
 
@@ -366,9 +395,7 @@ def main():
     if args.run_all or args.preprocess_only or args.plot_only:
         season  = preprocess()
 
-        drivers = (fetch_climate_drivers()
-                   .reset_index()
-                   .rename(columns={"index": "year"}))
+        drivers = fetch_climate_drivers()
         season  = season.merge(drivers, on="year", how="left")
 
         merged_path = PROC_DIR / "season_totals_with_drivers.csv"
