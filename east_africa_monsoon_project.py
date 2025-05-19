@@ -70,11 +70,15 @@ def fetch_climate_drivers(
 # ──────────────────────────────────────────────────────────────────────────────
 # 1.  CONFIG / CONSTANTS                                                        │
 # ──────────────────────────────────────────────────────────────────────────────
-DEF_BBOX   = (-4.62, 4.62, 33.5, 41.9)          # south, north, west, east (Kenya)
+
+DEF_BBOX   = (-4.62, 4.62, 33.5, 41.9)          # south, north, west, east
 DATA_DIR   = Path("data/raw")
 PROC_DIR   = Path("data/processed")
 OUT_DIR    = Path("outputs")
-for d in (DATA_DIR, PROC_DIR, OUT_DIR): d.mkdir(parents=True, exist_ok=True)
+for _d in (DATA_DIR, PROC_DIR, OUT_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
+DL_FILE = DATA_DIR / "chirps_mam.csv" 
 
 CHIRPS_URL = (
     "https://data.chc.ucsb.edu/products/CHIRPS/v3.0/monthly/africa/tifs/chirps-v3.0.{year}.{month:02d}.tif"
@@ -106,12 +110,22 @@ def download_chirps_month(year: int, month: int,
 # ──────────────────────────────────────────────────────────────────────────────
 # 2b.  LOOP OVER YEARS (March–May only)                                         │
 # ──────────────────────────────────────────────────────────────────────────────
-def download_year_range(start: int, end: int,
-                        bbox: Tuple[float, float, float, float] = DEF_BBOX):
-    """Download March-May CHIRPS means for every season in [start, end]."""
-    records = []
+def download_year_range(
+        start: int,
+        end: int,
+        bbox: Tuple[float, float, float, float] = DEF_BBOX,
+        force: bool = False
+):
+    """Download March–May CHIRPS means for each year in [start, end]."""
+    # ── 1 ▸ reuse cache if allowed
+    if DL_FILE.exists() and not force:
+        print("✔️  Using cached CHIRPS table", DL_FILE)
+        return                       # nothing else to do
+
+    # ── 2 ▸ otherwise fetch everything
+    records: list[dict] = []
     for y in range(start, end + 1):
-        for m in (3, 4, 5):          # March, April, May
+        for m in (3, 4, 5):          # March-April-May
             try:
                 mm = download_chirps_month(y, m, bbox)
                 records.append({"year": y, "month": m, "rain_mm": mm})
@@ -120,38 +134,94 @@ def download_year_range(start: int, end: int,
                 print(f"⚠️  {y}-{m:02d} failed: {e}")
 
     out = pd.DataFrame(records)
-    if out.empty:
+    if out.empty:                    # <- property, **not** callable
         raise RuntimeError("No data downloaded — check years or connection.")
-    out.to_csv(DATA_DIR / "chirps_mam.csv", index=False)
+
+    out.to_csv(DL_FILE, index=False)
+    print("📁  Saved", DL_FILE)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3.  PRE-PROCESS                                                               │
 # ──────────────────────────────────────────────────────────────────────────────
 def preprocess() -> pd.DataFrame:
-    df = pd.read_csv(DATA_DIR/"chirps_mam.csv")
-    if df.empty: raise ValueError("chirps_mam.csv is empty.")
+    """Clean CHIRPS monthly MAM table, build season totals & basic indices."""
+    df = pd.read_csv(DL_FILE)                     # <- already cached
+    if df.empty:
+        raise ValueError("chirps_mam.csv is empty.")
 
-    if (neg := (df.rain_mm<0).sum()):
-        print(f"⚠️  {neg} negative values → abs(mm)")
-        df["rain_mm"] = df.rain_mm.clip(lower=0); df.to_csv(DATA_DIR/"chirps_mam.csv", index=False)
+    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    df["month"] = df["month"].astype(int)
+    full_idx = pd.MultiIndex.from_product(
+        [range(df.year.min(), df.year.max() + 1), (3, 4, 5)],
+        names=["year", "month"]
+    )
+    df = (df.set_index(["year", "month"])
+            .reindex(full_idx)      # missing ⇒ NaN
+            .reset_index())
 
-    season = df.groupby("year").rain_mm.sum().rename("total_mm").reset_index()
+    n_missing = df.rain_mm.isna().sum()
+    if n_missing:
+        print(f"ℹ️  {n_missing} station-months missing → kept as NaN")
 
-    clim_mean = season.loc[season.year.between(1991,2020),"total_mm"].mean()
+    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    n_neg = (df.rain_mm < 0).sum(skipna=True)
+    if n_neg:
+        print(f"⚠️  {n_neg} negative values clipped to 0 mm")
+        df["rain_mm"] = df.rain_mm.clip(lower=0)
+
+    # keep the cleaned monthly file for future runs
+    df.to_csv(DL_FILE, index=False)
+
+    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    season = (df.groupby("year")
+                .rain_mm
+                .sum(min_count=3)           # if any month NaN ⇒ total NaN
+                .rename("total_mm")
+                .reset_index())
+
+    # flag / exclude implausible (≤0 mm) seasons from climatological stats
+    bad_tot = season.total_mm <= 0
+    if bad_tot.any():
+        print(f"⚠️  {bad_tot.sum()} seasons have non-positive totals – "
+              "excluded from SPI fit")
+        season.loc[bad_tot, "total_mm"] = np.nan
+
+    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    clim_mean = season.loc[
+        season.year.between(1991, 2020), "total_mm"
+    ].mean(skipna=True)
+
+    # fall-back if reference window has gaps
     if np.isnan(clim_mean) or clim_mean == 0:
-        clim_mean = season["total_mm"].mean()
-    season["anom_pct"] = 100*(season.total_mm - (clim_mean or season.total_mm.mean()))/clim_mean
-    season["anom_z"]   = (season.total_mm - season.total_mm.mean())/season.total_mm.std(ddof=0)
+        clim_mean = season.total_mm.mean(skipna=True)
 
-    # SPI-3
-    shp, loc, scl = stats.gamma.fit(season.total_mm, floc=0)
-    season["spi3"] = stats.norm.ppf(stats.gamma.cdf(season.total_mm, shp, loc=loc, scale=scl))
+    season["anom_pct"] = 100 * (season.total_mm - clim_mean) / clim_mean
+    season["anom_z"]   = (
+        (season.total_mm - season.total_mm.mean(skipna=True)) /
+        season.total_mm.std(ddof=0, skipna=True)
+    )
 
-    season.to_csv(PROC_DIR/"season_totals.csv", index=False)
+    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    valid = season.total_mm.dropna()
+    if valid.empty:
+        print("⚠️  No valid season totals – skipping SPI computation")
+        season["spi3"] = np.nan
+    else:
+        shp, loc, scl = stats.gamma.fit(valid, floc=0)
+        season["spi3"] = stats.norm.ppf(
+            stats.gamma.cdf(season.total_mm, shp, loc=loc, scale=scl)
+    )
+
+    season.to_csv(PROC_DIR / "season_totals.csv", index=False)
     return season
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 🔵 3a.  TREND SIGNIFICANCE (MK + Sen)                                         │
+# 3a.  TREND SIGNIFICANCE (MK + Sen)                                         │
 # ──────────────────────────────────────────────────────────────────────────────
 def trend_test(season_df: pd.DataFrame):
     if len(season_df) < 20: return
@@ -162,7 +232,7 @@ def trend_test(season_df: pd.DataFrame):
     else:
         print(f"No significant monotonic trend (p={p:.2f}).")
 
-
+# ──────────────────────────────────────────────────────────────────────────────
 # 4. FORECAST                                                            
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -264,40 +334,55 @@ def plot_season(season_df: pd.DataFrame, window:Optional[int]=10):
 # ──────────────────────────────────────────────────────────────────────────────
 # 8. CLI ENTRY-POINT                                                               
 # ──────────────────────────────────────────────────────────────────────────────
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", default="chirps", choices=["chirps", "power", "era5"])
+    ap.add_argument("--dataset", default="chirps",
+                    choices=["chirps", "power", "era5"])
     ap.add_argument("--start", type=int, default=2015)
-    ap.add_argument("--end", type=int, default=2024)
-    ap.add_argument("--bbox", type=float, nargs=4, help="south north west east")
-    ap.add_argument("--run-all", action="store_true")
-    ap.add_argument("--download-only", action="store_true")
-    ap.add_argument("--preprocess-only", action="store_true")
-    ap.add_argument("--forecast-only", action="store_true")
-    ap.add_argument("--cluster-only", action="store_true")
-    ap.add_argument("--classify-only", action="store_true")
-    ap.add_argument("--plot-only", action="store_true", help="Just draw/refresh the season_totals.png plot")
+    ap.add_argument("--end",   type=int, default=2024)
+    ap.add_argument("--bbox",  type=float, nargs=4,
+                    help="south north west east")
+    # workflow switches
+    ap.add_argument("--run-all",        action="store_true")
+    ap.add_argument("--download-only",  action="store_true")
+    ap.add_argument("--preprocess-only",action="store_true")
+    ap.add_argument("--forecast-only",  action="store_true")
+    ap.add_argument("--cluster-only",   action="store_true")
+    ap.add_argument("--classify-only",  action="store_true")
+    ap.add_argument("--plot-only",      action="store_true",
+                    help="Just refresh the season_totals.png plot")
+    ap.add_argument("--redownload",     action="store_true",
+                    help="Ignore cache and pull CHIRPS rasters again")
     args = ap.parse_args()
 
     bbox = tuple(args.bbox) if args.bbox else DEF_BBOX
 
+    # ---------------- download ------------------------------------------
     if args.run_all or args.download_only:
-        download_year_range(args.start, args.end, bbox)
+        download_year_range(args.start, args.end, bbox,
+                            force=args.redownload)
+
+    # ---------------- preprocess ----------------------------------------
     if args.run_all or args.preprocess_only or args.plot_only:
-        season = preprocess()
-        season = season.merge(fetch_climate_drivers(), on="year", how="left")
-        
+        season  = preprocess()
+
+        drivers = (fetch_climate_drivers()
+                   .reset_index()
+                   .rename(columns={"index": "year"}))
+        season  = season.merge(drivers, on="year", how="left")
+
         merged_path = PROC_DIR / "season_totals_with_drivers.csv"
         season.to_csv(merged_path, index=False)
-
         trend_test(season)
     else:
-        season = pd.read_csv(PROC_DIR/"season_totals_with_drivers.csv") \
-                 if (PROC_DIR/"season_totals_with_drivers.csv").exists() else None
+        merged_path = PROC_DIR / "season_totals_with_drivers.csv"
+        season = pd.read_csv(merged_path) if merged_path.exists() else None
 
     if season is None:
-        print("No processed data – run preprocessing first."); return
+        print("No processed data – run preprocessing first.")
+        return
+
+    # ---------------- downstream steps ----------------------------------
     if args.run_all or args.forecast_only:
         forecast(season)
     if args.run_all or args.cluster_only:
