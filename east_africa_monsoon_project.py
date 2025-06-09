@@ -312,7 +312,7 @@ def plot_season(season_df: pd.DataFrame, window:Optional[int]=10):
                    marker='*', s=80, color='black',
                    zorder=5, label='2025 provisional')
         
-    ax.set_title("Kenya March–May rainfall"); ax.set_xlabel("Year"); ax.set_ylabel("mm")
+    ax.set_title("Kenya Long-Rains 1981-2025"); ax.set_xlabel("Year"); ax.set_ylabel("mm")
     ax.xaxis.set_major_locator(MaxNLocator(integer=True)); ax.grid(alpha=.3)
 
     lines,labels = [],[]
