@@ -1,0 +1,2 @@
+blog_images/*.png binary merge=union
+blog_images/*.svg merge=union

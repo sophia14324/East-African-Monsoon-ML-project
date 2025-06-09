@@ -1,9 +1,14 @@
-#!/usr/bin/env python
+
 """
-QC-only SPI-3 calculator for a small year subset
+SPI Subset Quality-Control Script:
+
+Performs targeted SPI-3 recalculation for specific suspect years (2011 2012 2013 2014 2015)
+using fallback daily CHIRPS tiles if monthly tiles are incomplete.
+
 ✦ totally independent of east_africa_monsoon_project.py outputs ✦
-USAGE:
-    python spi_subset_qc.py 2011 2012 2013 2014 2015       # any list of years
+
+Example CLI:
+    python spi_subset_qc.py 2011 2012 2013 2014 2015      
 """
 
 import sys, calendar, requests, tempfile, shutil

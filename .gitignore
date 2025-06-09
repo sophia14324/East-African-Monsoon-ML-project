@@ -1,4 +1,12 @@
-# Byte-compiled / optimized / DLL files
+# Ignore virtual environment
+rains_env/
+
+# Ignore downloaded tiles
+data/raw/*.tif
+
+# Ignore compiled executables
+*.exe
+*.pyc
 __pycache__/
 *.py[cod]
 *$py.class
