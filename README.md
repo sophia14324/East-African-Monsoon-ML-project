@@ -25,4 +25,9 @@ pip install -r requirements.txt
 
 # 2. end-to-end run for Kenya 1981-2025
 python east_africa_monsoon_project.py --run-all --start 1981 --end 2025
+
+### 🌍 Want Tanzania instead?
+Just change the bounding-box (The ETL, SPI-3, clustering and plots adapt automatically):
+
+python east_africa_monsoon_project.py --bbox -11.7 -0.9 29.3 40.4 --run-all
   
