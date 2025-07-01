@@ -52,12 +52,12 @@ PROC_DIR   = Path("data/processed");PROC_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR    = Path("outputs");       OUT_DIR .mkdir(parents=True, exist_ok=True)
 
 MONTH_FILE = DATA_DIR / "chirps_mam.csv"        # 1981-… monthly 0.05°
-DAILY_DIR  = DATA_DIR / "daily_2025_05"         # cache for the May-2025 
-DAILY_DIR.mkdir(exist_ok=True)
+# DAILY_DIR  = DATA_DIR / "daily_2025_05"         # cache for the May-2025 
+# DAILY_DIR.mkdir(exist_ok=True)
 
 URL_MONTH = ("https://data.chc.ucsb.edu/products/CHIRPS/v3.0/monthly/africa/"
              "tifs/chirps-v3.0.{year}.{month:02d}.tif")
-URL_DAY   = ("https://data.chc.ucsb.edu/experimental/CHIRPS/v3.0/daily/prelim/IMERGlate-v07/2025/chirps-v3.0.2025.05.{day:02d}.tif")
+# URL_DAY   = ("https://data.chc.ucsb.edu/experimental/CHIRPS/v3.0/daily/prelim/IMERGlate-v07/2025/chirps-v3.0.2025.05.{day:02d}.tif")
 
 # ════════════════════════════════════════════════════════════════════════════
 # 2 CHIRPS helpers
@@ -78,7 +78,7 @@ def download_chirps_month(y:int, m:int, bbox, retry=3, t=60)->float:
         except Exception as e:
             if k == retry: raise
             time.sleep(5*k)
-
+''' 
 # ––– daily May-2025 –––
 def may25_total_mm(bbox) -> Optional[float]:
     """Sum CHIRPS daily Africa tiles for May-2025; cache on disk; return mm."""
@@ -99,9 +99,10 @@ def may25_total_mm(bbox) -> Optional[float]:
         total.append(_mean_rain_mm(tif, bbox))
     if not total:
         return None
-    return float(np.nansum(total))             
+    return float(np.nansum(total))  
+'''               
 # ════════════════════════════════════════════════════════════════════════════
-# 3 Download monthly MAM 1981-…
+# 3.1 Download monthly MAM 1981-…
 # ════════════════════════════════════════════════════════════════════════════
 def download_year_range(start:int,end:int,bbox,*,force=False):
     if MONTH_FILE.exists() and not force:
@@ -117,29 +118,39 @@ def download_year_range(start:int,end:int,bbox,*,force=False):
                 print(f"⚠️  {y}-{m:02d} failed: {e}")
     pd.DataFrame(rec).to_csv(MONTH_FILE, index=False)
     print("📁  Saved", MONTH_FILE)
+
+
+# ───────────────────────────────────────────────────────────────
+# 3.2 AUDIT seasons where only 1 or 2 of the three MAM months are present 
+# ───────────────────────────────────────────────────────────────
+def audit_missing_mam(month_file: Path = MONTH_FILE) -> None:
+    if not month_file.exists():
+        print("✖ No monthly file – run download first"); return
+
+    df = pd.read_csv(month_file)
+    df["month"] = df["month"].astype(int)
+
+    pivot = (df.pivot_table(index="year",
+                            columns="month",
+                            values="rain_mm",
+                            aggfunc="first")
+               .reindex(columns=[3, 4, 5]))          
+
+    miss_cnt = pivot.isna().sum(axis=1)
+
+    flagged = miss_cnt[(miss_cnt > 0) & (miss_cnt < 3)]
+    if flagged.empty:
+        print("✔️  All seasons have full 3-month coverage.")
+    else:
+        print("⚠️  Seasons with 1 or 2 missing MAM tiles:")
+        print(flagged.rename("missing_months").to_string())
+
 # ════════════════════════════════════════════════════════════════════════════
 # 4 Preprocess  (drop seasons with <3 months)
 # ════════════════════════════════════════════════════════════════════════════
 def preprocess(bbox) -> pd.DataFrame:
     df = pd.read_csv(MONTH_FILE)         
-    df["month"] = df["month"].astype(int)        
-    
-    PROV_MAY_2025 = 111.7          
-    mask_2025_may = (df.year == 2025) & (df.month == 5)
-
-    if mask_2025_may.any():                     
-        df.loc[mask_2025_may, "rain_mm"] = PROV_MAY_2025
-    else:                                       
-        df = pd.concat(
-                [df, pd.DataFrame([dict(year=2025,
-                                        month=5,
-                                        rain_mm=PROV_MAY_2025)])],
-                ignore_index=True
-        )
-
-    df.loc[(df.year == 2025) & (df.month == 5), "source"] = "daily-agg"
-    print(f"➕ ensured provisional May-2025 = {PROV_MAY_2025:.1f} mm")
-
+    df["month"] = df["month"].astype(int)
     df.loc[df.rain_mm < 0, "rain_mm"] = np.nan
 
     full = pd.MultiIndex.from_product(
@@ -306,11 +317,6 @@ def plot_season(season_df: pd.DataFrame, window:Optional[int]=10):
     if window and len(season_df)>=window:
         ax.plot(season_df.year, season_df.total_mm.rolling(window,center=True).mean(),
                 lw=2.2, ls="--", label=f"{window}-season mean")
-    if 2025 in season_df.year.values:
-        y25 = season_df.loc[season_df.year == 2025, 'total_mm'].values[0]
-        ax.scatter(2025, y25,
-                   marker='*', s=80, color='black',
-                   zorder=5, label='2025 provisional')
         
     ax.set_title("Kenya Long-Rains 1981-2025"); ax.set_xlabel("Year"); ax.set_ylabel("mm")
     ax.xaxis.set_major_locator(MaxNLocator(integer=True)); ax.grid(alpha=.3)
@@ -327,6 +333,8 @@ def plot_season(season_df: pd.DataFrame, window:Optional[int]=10):
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
     ap=argparse.ArgumentParser()
+    ap.add_argument("--audit-missing", action="store_true",
+                help="List years with 1 or 2 missing MAM months")
     ap.add_argument("--start",type=int,default=1981)
     ap.add_argument("--end",  type=int,default=2025)
     ap.add_argument("--bbox", nargs=4,type=float,help="S N W E")
@@ -339,6 +347,7 @@ def main():
     ap.add_argument("--classify-only",  action="store_true")
     ap.add_argument("--plot-only",      action="store_true",
                     help="Just refresh the season_totals.png plot")
+    
     args=ap.parse_args()
 
     bbox = tuple(args.bbox) if args.bbox else DEF_BBOX
@@ -367,6 +376,9 @@ def main():
         cluster(season)
     if args.run_all or args.classify_only:
         classify(season)
+    if args.audit_missing:
+        audit_missing_mam()
+        return 
 
 if __name__=="__main__":
     main()
